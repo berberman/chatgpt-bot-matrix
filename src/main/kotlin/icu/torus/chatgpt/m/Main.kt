@@ -2,6 +2,8 @@
 
 package icu.torus.chatgpt.m
 
+import ch.qos.logback.classic.Level
+import ch.qos.logback.classic.Logger
 import com.aallam.openai.api.chat.ChatCompletion
 import com.aallam.openai.api.chat.ChatCompletionRequest
 import com.aallam.openai.api.chat.ChatMessage
@@ -41,6 +43,7 @@ import net.folivo.trixnity.utils.toByteArray
 import net.folivo.trixnity.utils.toByteArrayFlow
 import okio.Path.Companion.toPath
 import org.jetbrains.exposed.sql.Database
+import org.slf4j.LoggerFactory
 import java.io.File
 import kotlin.concurrent.thread
 import kotlin.io.encoding.Base64
@@ -206,13 +209,25 @@ private suspend fun run() = coroutineScope {
                                                             prompt = cmd.prompt,
                                                             model = ModelId(cmd.modelId),
                                                             n = 1,
-                                                            size = ImageSize.is1024x1024
+                                                            size = ImageSize.is512x512
                                                         )
                                                     ).first()
-                                                    val flow =
-                                                        httpClient.get(image.url).bodyAsChannel().toByteArrayFlow()
+                                                    log.debug { image }
+                                                    val bytes =
+                                                        httpClient.get(image.url).readBytes()
+                                                    val fileName = Url(image.url).pathSegments.last()
                                                     matrixClient.room.sendMessage(timelineEvent.roomId) {
-                                                        image(File(image.url).name, flow)
+                                                        image(
+                                                            fileName,
+                                                            bytes.toByteArrayFlow(),
+                                                            null,
+                                                            null,
+                                                            fileName,
+                                                            ContentType.Image.PNG,
+                                                            bytes.size,
+                                                            512,
+                                                            512
+                                                        )
                                                         reply(timelineEvent)
                                                     }
                                                 }
@@ -229,7 +244,7 @@ private suspend fun run() = coroutineScope {
                                     }
                                     .onFailure {
                                         matrixClient.room.sendMessage(timelineEvent.roomId) {
-                                            log.info { "Failed to parse command $body: ${it.message}" }
+                                            log.error { "Failed to parse command $body: ${it.message}" }
                                             text(helpMessage)
                                         }
                                     }
@@ -312,5 +327,6 @@ private suspend fun run() = coroutineScope {
 }
 
 fun main() = runBlocking {
+    (LoggerFactory.getLogger("Exposed") as Logger).level = Level.INFO
     run()
 }
