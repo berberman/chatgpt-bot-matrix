@@ -152,8 +152,12 @@ private suspend fun run() = coroutineScope {
             launch per@{
                 runCatching {
                     val content = timelineEvent.content?.getOrNull()
-                    suspend fun requestChatAndReply(threadRootEventId: EventId, savedThreadToRequest: SavedThread) {
-                        log.debug { "Requesting $savedThreadToRequest" }
+                    suspend fun requestChatAndReply(
+                        threadRootEventId: EventId,
+                        savedThreadToRequest: SavedThread,
+                        inThread: Boolean
+                    ) {
+                        log.debug { "[$threadRootEventId]: Requesting $savedThreadToRequest" }
                         val completion = openai.chatCompletion(savedThreadToRequest.toRequest())
                         threads.putSavedThread(
                             timelineEvent.roomId,
@@ -166,20 +170,49 @@ private suspend fun run() = coroutineScope {
                                     text("Empty response")
                                 else
                                     text("[${savedThreadToRequest.modelId}] $it")
-                                thread(timelineEvent)
+                                if (inThread)
+                                    thread(timelineEvent)
+                                else
+                                    reply(timelineEvent)
                             }
                         }
                     }
+
+                    tailrec suspend fun findRootEvent(event: TimelineEvent): EventId {
+                        val relatesTo = event.relatesTo ?: return event.eventId
+                        return if (relatesTo is RelatesTo.Thread)
+                            relatesTo.eventId
+                        else {
+                            val previous = matrixClient.room.getTimelineEvent(
+                                event.roomId,
+                                relatesTo.eventId
+                            ).first()
+                            if (previous != null)
+                                findRootEvent(previous)
+                            else
+                                event.eventId
+                        }
+                    }
+
+                    // A message sent in thread automatically replies the latest on in thread
+                    // if it's not explicitly replying some messages.
+                    // So we handle messages that are either in thread or replying to us
+                    suspend fun isInThreadOrReplyingToMe(): Boolean =
+                        timelineEvent.relatesTo is RelatesTo.Thread || (
+                                timelineEvent.relatesTo?.replyTo?.let {
+                                    matrixClient.room.getTimelineEvent(timelineEvent.roomId, it.eventId).first()?.sender
+                                }?.let { it == matrixClient.userId } ?: false)
+
                     if (content is RoomMessageEventContent.TextBased.Text) {
                         val body = content.body
 
                         // Ignore messages started with //
                         if (body.startsWith("//"))
                             return@per
-                        val isReplyingThread = timelineEvent.relatesTo is RelatesTo.Thread
+                        val isReplying = timelineEvent.relatesTo != null
 
                         val isCommand = CommandParser.isCommand(body)
-                        if (isCommand && !isReplyingThread) {
+                        if (isCommand && !isReplying) {
                             // This message is calling a command
                             matrixClient.withSetTyping(timelineEvent.roomId) {
                                 CommandParser.parse(body)
@@ -200,7 +233,7 @@ private suspend fun run() = coroutineScope {
                                                             }
                                                         )
                                                     )
-                                                    requestChatAndReply(timelineEvent.eventId, savedThread)
+                                                    requestChatAndReply(timelineEvent.eventId, savedThread, true)
                                                 }
 
                                                 Command.Model.Type.Image -> {
@@ -209,7 +242,7 @@ private suspend fun run() = coroutineScope {
                                                             prompt = cmd.prompt,
                                                             model = ModelId(cmd.modelId),
                                                             n = 1,
-                                                            size = ImageSize.is512x512
+                                                            size = ImageSize.is1024x1024
                                                         )
                                                     ).first()
                                                     log.debug { image }
@@ -225,8 +258,8 @@ private suspend fun run() = coroutineScope {
                                                             fileName,
                                                             ContentType.Image.PNG,
                                                             bytes.size,
-                                                            512,
-                                                            512
+                                                            1024,
+                                                            1024
                                                         )
                                                         reply(timelineEvent)
                                                     }
@@ -250,19 +283,21 @@ private suspend fun run() = coroutineScope {
                                     }
 
                             }
-                        } else {
-                            // This message is replying to a thread
-                            val relatesTo = timelineEvent.relatesTo
-                            if (relatesTo is RelatesTo.Thread) {
-                                val threadRootEventId = relatesTo.eventId
-                                val savedThread = threads.getSavedThread(timelineEvent.roomId, threadRootEventId)
-                                    ?.addUserTextMessage(body)
-                                if (savedThread != null) {
-                                    matrixClient.withSetTyping(timelineEvent.roomId) {
-                                        requestChatAndReply(threadRootEventId, savedThread)
-                                    }
+                        } else if (isInThreadOrReplyingToMe()) {
+                            // This message is a reply
+                            val threadRootEventId = findRootEvent(timelineEvent)
+                            val savedThread = threads.getSavedThread(timelineEvent.roomId, threadRootEventId)
+                                ?.addUserTextMessage(body)
+                            if (savedThread != null) {
+                                matrixClient.withSetTyping(timelineEvent.roomId) {
+                                    requestChatAndReply(
+                                        threadRootEventId,
+                                        savedThread,
+                                        timelineEvent.relatesTo is RelatesTo.Thread
+                                    )
                                 }
                             }
+
                         }
                         when {
                             body.lowercase().startsWith("ping") -> {
@@ -278,28 +313,36 @@ private suspend fun run() = coroutineScope {
                     }
 
                     if (content is RoomMessageEventContent.FileBased.Image) {
-                        // This message is replying to a thread
-                        val relatesTo = timelineEvent.relatesTo
-                        if (relatesTo is RelatesTo.Thread) {
-                            val threadRootEventId = relatesTo.eventId
+                        // This message is a reply
+                        if (timelineEvent.relatesTo != null && isInThreadOrReplyingToMe()) {
+                            val threadRootEventId = findRootEvent(timelineEvent)
                             val savedThread = threads.getSavedThread(timelineEvent.roomId, threadRootEventId)
                             if (savedThread != null) {
-                                matrixClient.withSetTyping(timelineEvent.roomId) {
-                                    val imageType =
-                                        content.info?.mimeType?.removePrefix("image/")
-                                            ?: File(content.body).extension
-                                    val image = if (timelineEvent.isEncrypted) {
-                                        content.file?.let { file ->
-                                            matrixClient.media.getEncryptedMedia(file).getOrThrow().toByteArray()
-                                        }
-                                    } else {
-                                        content.url?.let { matrixClient.media.getMedia(it).getOrThrow() }?.toByteArray()
+                                if (savedThread.modelId != "gpt-4o")
+                                    matrixClient.room.sendMessage(timelineEvent.roomId) {
+                                        text("Only gpt-4o supports images")
+                                        reply(timelineEvent)
                                     }
-                                    if (image != null) {
-                                        requestChatAndReply(
-                                            threadRootEventId,
-                                            savedThread.addUserImage(image, imageType)
-                                        )
+                                else {
+                                    matrixClient.withSetTyping(timelineEvent.roomId) {
+                                        val imageType =
+                                            content.info?.mimeType?.removePrefix("image/")
+                                                ?: File(content.body).extension
+                                        val image = if (timelineEvent.isEncrypted) {
+                                            content.file?.let { file ->
+                                                matrixClient.media.getEncryptedMedia(file).getOrThrow().toByteArray()
+                                            }
+                                        } else {
+                                            content.url?.let { matrixClient.media.getMedia(it).getOrThrow() }
+                                                ?.toByteArray()
+                                        }
+                                        if (image != null) {
+                                            requestChatAndReply(
+                                                threadRootEventId,
+                                                savedThread.addUserImage(image, imageType),
+                                                timelineEvent.relatesTo is RelatesTo.Thread
+                                            )
+                                        }
                                     }
                                 }
                             }
