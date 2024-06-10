@@ -251,7 +251,7 @@ private suspend fun run() = coroutineScope {
                                                     val fileName = Url(image.url).pathSegments.last()
                                                     matrixClient.room.sendMessage(timelineEvent.roomId) {
                                                         image(
-                                                            fileName,
+                                                            image.revisedPrompt ?: fileName,
                                                             bytes.toByteArrayFlow(),
                                                             null,
                                                             null,
