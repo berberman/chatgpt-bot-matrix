@@ -1,5 +1,7 @@
 package icu.torus.chatgpt.m
 
+import com.aallam.openai.api.image.ImageSize
+
 object CommandParser {
     private val knownCommands = arrayOf("chat", "image", "pricing")
     fun isCommand(input: String): Boolean =
@@ -33,9 +35,9 @@ object CommandParser {
                                 }
                             // drop o/4 and ws
                             raw = raw.drop(2)
-                            Command.Model(model, raw, Command.Model.Type.Chat)
+                            Command.ChatCommand(model, raw)
                         } else
-                            Command.Model("gpt-3.5-turbo", raw, Command.Model.Type.Chat)
+                            Command.ChatCommand("gpt-3.5-turbo", raw)
                     } else
                         throw IllegalArgumentException("Prompt is empty")
                 }
@@ -46,9 +48,9 @@ object CommandParser {
                         if ((x == '3') && raw[1] == ' ') {
                             // drop 3 and ws
                             raw = raw.drop(2)
-                            Command.Model("dall-e-3", raw, Command.Model.Type.Image)
+                            Command.ImageCommand("dall-e-3", raw, ImageSize.is1024x1024)
                         } else
-                            Command.Model("dall-e-2", raw, Command.Model.Type.Image)
+                            Command.ImageCommand("dall-e-2", raw, ImageSize.is1024x1024)
                     } else
                         throw IllegalArgumentException("Prompt is empty")
                 }

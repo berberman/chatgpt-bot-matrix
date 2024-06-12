@@ -24,6 +24,7 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.5.6")
     implementation("io.github.irgaly.kottage:kottage:1.7.0")
     implementation("com.aallam.openai:openai-client:3.7.2")
+    implementation("org.jetbrains:markdown:0.7.3")
 }
 
 kotlin {
